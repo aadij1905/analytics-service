@@ -4,7 +4,7 @@ const analyticsRouter = require("./routes/analytics");
 const ingestRouter = require("./routes/ingest");
 
 const app = express();
-const PORT = 4000;
+const PORT = process.env.PORT || 4000;
 
 app.use(cors());
 app.use(express.json({ limit: "5mb" }));
