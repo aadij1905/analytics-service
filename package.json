@@ -1,0 +1,18 @@
+{
+  "name": "analytics-service",
+  "version": "4.0.0",
+  "description": "Analytics service for Shopify store data — port 4000",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.18.2",
+    "playwright": "^1.44.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.0"
+  }
+}
