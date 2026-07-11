@@ -1,12 +1,48 @@
-function toNumber(v) { const n = parseFloat(v); return isNaN(n) ? 0 : n; }
-function sumField(rows, field) { return rows.reduce((s, r) => s + toNumber(r[field]), 0); }
+// toCount: missing/NaN counts default to 0 (safe for sums).
+// toRate: missing/NaN rates stay null so detectors know it's "not measured",
+// not "measured as zero" — a real distinction that was silently collapsing.
+function toCount(v) {
+  const n = parseFloat(v);
+  return isNaN(n) ? 0 : n;
+}
+function toRate(v) {
+  if (v == null || v === "") return null;
+  const n = parseFloat(v);
+  return isNaN(n) ? null : n;
+}
+function sumField(rows, field) {
+  return rows.reduce((s, r) => s + toCount(r[field]), 0);
+}
 function avgWeighted(rows, valueField, weightField) {
   const totalWeight = sumField(rows, weightField);
   if (!totalWeight) return 0;
-  return rows.reduce((s, r) => s + toNumber(r[valueField]) * toNumber(r[weightField]), 0) / totalWeight;
+  return rows.reduce(
+    (s, r) => s + toCount(r[valueField]) * toCount(r[weightField]),
+    0,
+  ) / totalWeight;
 }
-function round2(n) { return Math.round(n * 100) / 100; }
-function round4(n) { return Math.round(n * 10000) / 10000; }
+function round2(n) { return n == null ? null : Math.round(n * 100) / 100; }
+function round4(n) { return n == null ? null : Math.round(n * 10000) / 10000; }
+
+// Path normalization for the CWV → pages join. Strips trailing slash, query
+// string, and case so /Products/foo, /products/foo/, and /products/foo?v=1
+// join to the same key.
+function normalizePath(p) {
+  if (p == null) return null;
+  let s = String(p).trim().toLowerCase();
+  const q = s.indexOf("?");
+  if (q !== -1) s = s.slice(0, q);
+  if (s.length > 1 && s.endsWith("/")) s = s.slice(0, -1);
+  return s;
+}
+
+// Traffic source names come from ShopifyQL as-is: "Google", "google",
+// "Google / organic" — group them so downstream doesn't split one source
+// into three rows.
+function normalizeSource(name) {
+  if (!name) return "unknown";
+  return String(name).trim().toLowerCase().split(/[\s/]+/)[0];
+}
 
 function normalize(rawExtraction) {
   const {
@@ -36,7 +72,9 @@ function normalize(rawExtraction) {
     if (!checkoutConversion || !checkoutConversion.length) return null;
     const totalWeight = sumField(checkoutConversion, "sessions");
     if (totalWeight > 0) return avgWeighted(checkoutConversion, "checkout_conversion_rate", "sessions");
-    const rates = checkoutConversion.map((r) => toNumber(r.checkout_conversion_rate)).filter((n) => n > 0);
+    const rates = checkoutConversion
+      .map((r) => toRate(r.checkout_conversion_rate))
+      .filter((n) => n != null && n > 0);
     return rates.length ? rates.reduce((s, n) => s + n, 0) / rates.length : null;
   })();
   const cartAbandonmentRate =
@@ -50,75 +88,77 @@ function normalize(rawExtraction) {
     sessions_that_reached_checkout: sumField(funnelBreakdown, "sessions_that_reached_checkout"),
     sessions_that_completed_checkout: sumField(funnelBreakdown, "sessions_that_completed_checkout"),
   };
+  // Single source of truth for sessions: prefer overview (canonical), fall back
+  // to funnel totals. Old code did the reverse which could disagree.
+  const funnelSessions = totalSessions || toCount(funnelTotals.sessions);
+  const cartAdditions = toCount(funnelTotals.sessions_with_cart_additions);
+  const reachedCheckout = toCount(funnelTotals.sessions_that_reached_checkout);
+  const completedCheckout = toCount(funnelTotals.sessions_that_completed_checkout);
+
   const funnelNormalized = {
-    sessions: toNumber(funnelTotals.sessions) || totalSessions,
-    sessionsWithCartAdditions: toNumber(funnelTotals.sessions_with_cart_additions),
-    sessionsThatReachedCheckout: toNumber(funnelTotals.sessions_that_reached_checkout),
-    sessionsThatCompletedCheckout: toNumber(funnelTotals.sessions_that_completed_checkout),
+    sessions: funnelSessions,
+    sessionsWithCartAdditions: cartAdditions,
+    sessionsThatReachedCheckout: reachedCheckout,
+    sessionsThatCompletedCheckout: completedCheckout,
     conversionRate: round4(overallConversionRate),
-    cartAdditionRate: totalSessions
-      ? round4(toNumber(funnelTotals.sessions_with_cart_additions) / totalSessions)
-      : null,
-    checkoutReachRate: toNumber(funnelTotals.sessions_with_cart_additions)
-      ? round4(
-          toNumber(funnelTotals.sessions_that_reached_checkout) /
-          toNumber(funnelTotals.sessions_with_cart_additions)
-        )
-      : null,
-    checkoutCompletionRate: toNumber(funnelTotals.sessions_that_reached_checkout)
-      ? round4(
-          toNumber(funnelTotals.sessions_that_completed_checkout) /
-          toNumber(funnelTotals.sessions_that_reached_checkout)
-        )
-      : null,
+    cartAdditionRate: funnelSessions ? round4(cartAdditions / funnelSessions) : null,
+    checkoutReachRate: cartAdditions ? round4(reachedCheckout / cartAdditions) : null,
+    checkoutCompletionRate: reachedCheckout ? round4(completedCheckout / reachedCheckout) : null,
     dailyFunnel: funnelBreakdown
       .filter((r) => r.day && r.day !== "total")
       .map((r) => ({
         day: r.day,
-        sessions: toNumber(r.sessions),
-        cartAdditions: toNumber(r.sessions_with_cart_additions),
-        reachedCheckout: toNumber(r.sessions_that_reached_checkout),
-        completedCheckout: toNumber(r.sessions_that_completed_checkout),
+        sessions: toCount(r.sessions),
+        cartAdditions: toCount(r.sessions_with_cart_additions),
+        reachedCheckout: toCount(r.sessions_that_reached_checkout),
+        completedCheckout: toCount(r.sessions_that_completed_checkout),
       })),
   };
 
-  // Performance lookup maps keyed by page_path (web_performance table)
-  // page_path in web_performance matches landing_page_path value in sessions table
+  // Performance lookup maps keyed by normalized page path (web_performance).
+  // Old code joined raw strings — trailing slash / case / query string
+  // mismatches silently dropped CWV per page.
   const lcpByPath = {};
   for (const r of (performanceLCP || [])) {
-    lcpByPath[r.page_path] = { lcp_p75_ms: toNumber(r.lcp_p75_ms), page_loads: toNumber(r.page_loads) };
+    lcpByPath[normalizePath(r.page_path)] = { lcp_p75_ms: toRate(r.lcp_p75_ms) };
   }
   const clsByPath = {};
   for (const r of (performanceCLS || [])) {
-    clsByPath[r.page_path] = { p75_cls: toNumber(r.p75_cls), page_loads: toNumber(r.page_loads) };
+    clsByPath[normalizePath(r.page_path)] = { p75_cls: toRate(r.p75_cls) };
   }
   const inpByPath = {};
   for (const r of (performanceINP || [])) {
-    inpByPath[r.page_path] = { inp_p75_ms: toNumber(r.inp_p75_ms), page_loads: toNumber(r.page_loads) };
+    inpByPath[normalizePath(r.page_path)] = { inp_p75_ms: toRate(r.inp_p75_ms) };
   }
 
   // Pages
   const pagesNormalized = pages.map((row) => {
-    const path = row.landing_page_path;
+    const rawPath = row.landing_page_path;
+    const key = normalizePath(rawPath);
+    const lcpEntry = lcpByPath[key];
+    const clsEntry = clsByPath[key];
+    const inpEntry = inpByPath[key];
     return {
-      path,
-      sessions: toNumber(row.sessions),
-      conversionRate: round4(toNumber(row.conversion_rate)),
-      bounceRate: round4(toNumber(row.bounce_rate)),
-      lcp_p75_ms: lcpByPath[path]?.lcp_p75_ms ?? null,
-      p75_cls: clsByPath[path]?.p75_cls ?? null,
-      inp_p75_ms: inpByPath[path]?.inp_p75_ms ?? null,
-      lcpStatus: lcpByPath[path]
-        ? lcpByPath[path].lcp_p75_ms <= 2500 ? "good"
-          : lcpByPath[path].lcp_p75_ms <= 4000 ? "needs_improvement" : "poor"
+      path: rawPath,
+      sessions: toCount(row.sessions),
+      // Rates: preserve null so downstream detectors distinguish
+      // "no measurement" from "measured as zero".
+      conversionRate: round4(toRate(row.conversion_rate)),
+      bounceRate: round4(toRate(row.bounce_rate)),
+      lcp_p75_ms: lcpEntry?.lcp_p75_ms ?? null,
+      p75_cls: clsEntry?.p75_cls ?? null,
+      inp_p75_ms: inpEntry?.inp_p75_ms ?? null,
+      lcpStatus: lcpEntry?.lcp_p75_ms != null
+        ? lcpEntry.lcp_p75_ms <= 2500 ? "good"
+          : lcpEntry.lcp_p75_ms <= 4000 ? "needs_improvement" : "poor"
         : null,
-      clsStatus: clsByPath[path]
-        ? clsByPath[path].p75_cls <= 0.1 ? "good"
-          : clsByPath[path].p75_cls <= 0.25 ? "needs_improvement" : "poor"
+      clsStatus: clsEntry?.p75_cls != null
+        ? clsEntry.p75_cls <= 0.1 ? "good"
+          : clsEntry.p75_cls <= 0.25 ? "needs_improvement" : "poor"
         : null,
-      inpStatus: inpByPath[path]
-        ? inpByPath[path].inp_p75_ms <= 200 ? "good"
-          : inpByPath[path].inp_p75_ms <= 500 ? "needs_improvement" : "poor"
+      inpStatus: inpEntry?.inp_p75_ms != null
+        ? inpEntry.inp_p75_ms <= 200 ? "good"
+          : inpEntry.inp_p75_ms <= 500 ? "needs_improvement" : "poor"
         : null,
       // Crawler-exclusive fields — null until Stage 2 fills them
       ctaText: null,
@@ -131,12 +171,35 @@ function normalize(rawExtraction) {
     };
   });
 
-  // Traffic sources
-  const trafficNormalized = trafficSources.map((row) => ({
-    source: row.referrer_source,
-    sessions: toNumber(row.sessions),
-    conversionRate: round4(toNumber(row.conversion_rate)),
-    bounceRate: round4(toNumber(row.bounce_rate)),
+  // Traffic sources — group by lowercased primary token so "Google",
+  // "google", "google.com / organic" collapse into one row.
+  const trafficByGroup = new Map();
+  for (const row of (trafficSources || [])) {
+    const key = normalizeSource(row.referrer_source);
+    const sessions = toCount(row.sessions);
+    const cr = toRate(row.conversion_rate);
+    const br = toRate(row.bounce_rate);
+    const g = trafficByGroup.get(key);
+    if (!g) {
+      trafficByGroup.set(key, {
+        source: key,
+        sessions,
+        crWeighted: cr != null ? cr * sessions : 0,
+        brWeighted: br != null ? br * sessions : 0,
+        crWeight: cr != null ? sessions : 0,
+        brWeight: br != null ? sessions : 0,
+      });
+    } else {
+      g.sessions += sessions;
+      if (cr != null) { g.crWeighted += cr * sessions; g.crWeight += sessions; }
+      if (br != null) { g.brWeighted += br * sessions; g.brWeight += sessions; }
+    }
+  }
+  const trafficNormalized = [...trafficByGroup.values()].map((g) => ({
+    source: g.source,
+    sessions: g.sessions,
+    conversionRate: g.crWeight ? round4(g.crWeighted / g.crWeight) : null,
+    bounceRate: g.brWeight ? round4(g.brWeighted / g.brWeight) : null,
   }));
 
   // Devices — ONLY sessions and online_store_visitors are real per device.
@@ -146,20 +209,25 @@ function normalize(rawExtraction) {
   const devicesNormalized = {};
   for (const row of (devices || [])) {
     devicesNormalized[row.session_device_type] = {
-      sessions: toNumber(row.sessions),
-      onlineStoreVisitors: toNumber(row.online_store_visitors),
+      sessions: toCount(row.sessions),
+      onlineStoreVisitors: toCount(row.online_store_visitors),
       percentage: totalDeviceSessions
-        ? round4(toNumber(row.sessions) / totalDeviceSessions)
+        ? round4(toCount(row.sessions) / totalDeviceSessions)
         : 0,
       conversionRate: null,
       bounceRate: null,
-      avgPageLoadTime: null,
       requiresAdditionalQuery: true,
     };
   }
 
+  // Honor the extractor's declared period if present; fall back to "7d".
+  const period =
+    rawExtraction.metrics?.period ||
+    rawExtraction.metrics?.window ||
+    "7d";
+
   return {
-    period: "7d",
+    period,
     fetchedAt: new Date().toISOString(),
     dataSource: "shopify",
     websiteUrl: rawExtraction.websiteUrl || null,
@@ -171,21 +239,22 @@ function normalize(rawExtraction) {
       conversionRate: round4(overallConversionRate),
       bounceRate: round4(overallBounceRate),
       cartAbandonmentRate,
-      avgPageLoadTime: null,
+      // avgPageLoadTime intentionally omitted — no single ShopifyQL field
+      // provides it; use pages[].lcp_p75_ms instead.
     },
     dailyOverview: overviewRows
       .filter((r) => r.day && r.day !== "total")
       .map((r) => ({
         day: r.day,
-        sessions: toNumber(r.sessions),
-        conversionRate: round4(toNumber(r.conversion_rate)),
-        bounceRate: round4(toNumber(r.bounce_rate)),
+        sessions: toCount(r.sessions),
+        conversionRate: round4(toRate(r.conversion_rate)),
+        bounceRate: round4(toRate(r.bounce_rate)),
       })),
     dailySales: sales.map((r) => ({
       day: r.day,
-      sales: round2(toNumber(r.total_sales)),
-      orders: toNumber(r.total_orders),
-      aov: round2(toNumber(r.average_order_value)),
+      sales: round2(toCount(r.total_sales)),
+      orders: toCount(r.total_orders),
+      aov: round2(toCount(r.average_order_value)),
     })),
     funnel: funnelNormalized,
     traffic: trafficNormalized,
