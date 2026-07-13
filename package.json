@@ -5,8 +5,7 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "dev": "nodemon index.js",
-    "postinstall": "npx playwright install --with-deps chromium"
+    "dev": "nodemon index.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1085.0",
