@@ -36,7 +36,15 @@ async function openSession() {
   async function visit(pageUrl, outputDir) {
     const page = await context.newPage();
     try {
-      await page.goto(pageUrl, { waitUntil: "networkidle", timeout: 30000 });
+      // "networkidle" hangs indefinitely on real storefronts with persistent
+      // background chatter (chat widgets, review-app polling, analytics
+      // beacons) — it waits for ALL network activity to stop, which many
+      // Shopify apps never let happen. "load" plus a short fixed settle
+      // delay is far more reliable: it waits for the page itself to finish
+      // loading, then gives app-injected DOM (CTAs, review widgets) a beat
+      // to render without waiting on background traffic that never quiets.
+      await page.goto(pageUrl, { waitUntil: "load", timeout: 30000 });
+      await page.waitForTimeout(1000);
 
       // Every visit — not just the initial unlock — checks for the password
       // wall. The unlock cookie can fail to apply to a given request, expire
@@ -135,7 +143,7 @@ async function openSession() {
     const page = await context.newPage();
     let hasPasswordWall;
     try {
-      await page.goto(`${baseUrl}/password`, { waitUntil: "networkidle", timeout: 30000 });
+      await page.goto(`${baseUrl}/password`, { waitUntil: "load", timeout: 30000 });
       hasPasswordWall = (await page.$('input[type="password"]')) !== null;
     } catch (err) {
       console.error(`Storefront unlock check failed for ${baseUrl}:`, err.message);
@@ -155,7 +163,7 @@ async function openSession() {
         const input = await page.$('input[type="password"]');
         await input.fill(password);
         await Promise.all([
-          page.waitForNavigation({ waitUntil: "networkidle", timeout: 30000 }).catch(() => {}),
+          page.waitForNavigation({ waitUntil: "load", timeout: 30000 }).catch(() => {}),
           input.press("Enter"),
         ]);
       } catch (err) {
@@ -166,7 +174,7 @@ async function openSession() {
       // post-submit state — this is exactly what every later visit() call
       // will experience, so it's the only check that can't false-positive.
       try {
-        await page.goto(baseUrl, { waitUntil: "networkidle", timeout: 30000 });
+        await page.goto(baseUrl, { waitUntil: "load", timeout: 30000 });
         if (!page.url().includes("/password")) {
           await page.close();
           return true;
@@ -176,7 +184,7 @@ async function openSession() {
       }
 
       if (attempt < 2) {
-        await page.goto(`${baseUrl}/password`, { waitUntil: "networkidle", timeout: 30000 }).catch(() => {});
+        await page.goto(`${baseUrl}/password`, { waitUntil: "load", timeout: 30000 }).catch(() => {});
       }
     }
 
