@@ -13,7 +13,7 @@ router.post("/api/analytics/ingest", async (req, res) => {
     });
   }
 
-  const { storeId, websiteUrl } = rawExtraction;
+  const { storeId, websiteUrl, storePassword } = rawExtraction;
   const shouldCrawl = Boolean(websiteUrl && websiteUrl.trim().length > 0);
 
   const normalized = normalize(rawExtraction);
@@ -35,7 +35,7 @@ router.post("/api/analytics/ingest", async (req, res) => {
 
   if (shouldCrawl) {
     setCrawlStatus(storeId, "running");
-    runCrawler(normalized, websiteUrl)
+    runCrawler(normalized, websiteUrl, storePassword)
       .then((crawledNormalized) => {
         const updatedFlags = detectAll(crawledNormalized, { crawlerRan: true });
         setData(storeId, crawledNormalized, updatedFlags, rawExtraction, { crawlerRan: true });

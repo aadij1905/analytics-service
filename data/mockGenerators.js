@@ -61,7 +61,7 @@ function generateMockNormalized(storeId) {
         lcp_p75_ms: 2800, p75_cls: 0.12, inp_p75_ms: 210,
         lcpStatus: "needs_improvement", clsStatus: "needs_improvement", inpStatus: "needs_improvement",
         ctaText: null, ctaAboveFoldDesktop: null, ctaAboveFoldMobile: null,
-        hasSocialProof: null, scrollDepth: null, screenshotPath: null, crawlerEnriched: false,
+        hasSocialProof: null, scrollDepth: null, screenshotUrl: null, mobileScreenshotUrl: null, crawlerEnriched: false,
       },
       {
         path: "/products/wireless-earbuds-pro",
@@ -69,7 +69,7 @@ function generateMockNormalized(storeId) {
         lcp_p75_ms: 4500, p75_cls: 0.05, inp_p75_ms: 180,
         lcpStatus: "poor", clsStatus: "good", inpStatus: "good",
         ctaText: null, ctaAboveFoldDesktop: null, ctaAboveFoldMobile: null,
-        hasSocialProof: null, scrollDepth: null, screenshotPath: null, crawlerEnriched: false,
+        hasSocialProof: null, scrollDepth: null, screenshotUrl: null, mobileScreenshotUrl: null, crawlerEnriched: false,
       },
       {
         path: "/collections/all",
@@ -77,7 +77,7 @@ function generateMockNormalized(storeId) {
         lcp_p75_ms: 3100, p75_cls: 0.08, inp_p75_ms: 160,
         lcpStatus: "needs_improvement", clsStatus: "good", inpStatus: "good",
         ctaText: null, ctaAboveFoldDesktop: null, ctaAboveFoldMobile: null,
-        hasSocialProof: null, scrollDepth: null, screenshotPath: null, crawlerEnriched: false,
+        hasSocialProof: null, scrollDepth: null, screenshotUrl: null, mobileScreenshotUrl: null, crawlerEnriched: false,
       },
     ],
   };

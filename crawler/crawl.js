@@ -1,4 +1,5 @@
 const { chromium } = require("playwright");
+const { saveScreenshot } = require("./screenshotStorage");
 
 const CTA_SELECTORS = [
   "[data-testid='add-to-cart']",
@@ -37,6 +38,25 @@ async function openSession() {
     try {
       await page.goto(pageUrl, { waitUntil: "networkidle", timeout: 30000 });
 
+      // Every visit — not just the initial unlock — checks for the password
+      // wall. The unlock cookie can fail to apply to a given request, expire
+      // mid-crawl, or unlock() can have false-positived success; trusting
+      // "we unlocked once" for the rest of the session silently turns wall
+      // screenshots into fake "real" data. Shopify redirects ANY blocked
+      // route to /password, so a URL check here is exact, not a guess.
+      if (page.url().includes("/password")) {
+        return {
+          ctaText: null,
+          ctaAboveFoldDesktop: null,
+          ctaAboveFoldMobile: null,
+          hasSocialProof: false,
+          scrollDepth: null,
+          screenshotUrl: null,
+          mobileScreenshotUrl: null,
+          crawlerBlocked: true,
+        };
+      }
+
       // CTA detection
       let ctaText = null;
       let ctaAboveFoldDesktop = null;
@@ -70,12 +90,21 @@ async function openSession() {
         ? Math.min(1, DESKTOP_VIEWPORT.height / scrollHeight)
         : null;
 
-      // Screenshot
-      const screenshotPath = outputDir
-        ? `${outputDir}/${Date.now()}.jpg`
-        : null;
-      if (screenshotPath) {
-        await page.screenshot({ path: screenshotPath, type: "jpeg", quality: 80 });
+      // Screenshots — one per viewport, sharing a timestamp so the two
+      // files for a page are easy to pair up. saveScreenshot() uploads to
+      // R2 when configured, otherwise falls back to outputDir on local disk.
+      let screenshotUrl = null;
+      let mobileScreenshotUrl = null;
+
+      if (outputDir) {
+        const ts = Date.now();
+        const desktopBuffer = await page.screenshot({ type: "jpeg", quality: 80 });
+        screenshotUrl = await saveScreenshot(desktopBuffer, `${ts}-desktop.jpg`, outputDir);
+
+        await page.setViewportSize(MOBILE_VIEWPORT);
+        const mobileBuffer = await page.screenshot({ type: "jpeg", quality: 80 });
+        mobileScreenshotUrl = await saveScreenshot(mobileBuffer, `${ts}-mobile.jpg`, outputDir);
+        await page.setViewportSize(DESKTOP_VIEWPORT);
       }
 
       return {
@@ -84,11 +113,75 @@ async function openSession() {
         ctaAboveFoldMobile,
         hasSocialProof,
         scrollDepth,
-        screenshotPath,
+        screenshotUrl,
+        mobileScreenshotUrl,
+        crawlerBlocked: false,
       };
     } finally {
       await page.close();
     }
+  }
+
+  // Password-protected storefronts (pre-launch / dev stores) gate every
+  // route behind Shopify's standard /password page. Submitting the form
+  // once sets a cookie on `context`, so subsequent visit() calls in this
+  // same session reach real pages instead of the password wall.
+  // Three-state return — callers need to tell "nothing to do" apart from
+  // "we tried and failed", since only the latter should abort the crawl:
+  //   null  — no password wall found; store isn't password-protected
+  //   true  — wall found and unlocked
+  //   false — wall found, unlock failed after retries
+  async function unlock(baseUrl, password) {
+    const page = await context.newPage();
+    let hasPasswordWall;
+    try {
+      await page.goto(`${baseUrl}/password`, { waitUntil: "networkidle", timeout: 30000 });
+      hasPasswordWall = (await page.$('input[type="password"]')) !== null;
+    } catch (err) {
+      console.error(`Storefront unlock check failed for ${baseUrl}:`, err.message);
+      await page.close();
+      return false;
+    }
+    if (!hasPasswordWall) {
+      await page.close();
+      return null; // store isn't password-protected — nothing to do
+    }
+
+    // Up to 2 attempts — a single miss is often a transient redirect/timing
+    // race, not a wrong password, so one retry avoids wasting an otherwise
+    // successful crawl over a fluke.
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        const input = await page.$('input[type="password"]');
+        await input.fill(password);
+        await Promise.all([
+          page.waitForNavigation({ waitUntil: "networkidle", timeout: 30000 }).catch(() => {}),
+          input.press("Enter"),
+        ]);
+      } catch (err) {
+        console.error(`Unlock submit attempt ${attempt} failed for ${baseUrl}:`, err.message);
+      }
+
+      // Verify against the actual target, not the password page's own
+      // post-submit state — this is exactly what every later visit() call
+      // will experience, so it's the only check that can't false-positive.
+      try {
+        await page.goto(baseUrl, { waitUntil: "networkidle", timeout: 30000 });
+        if (!page.url().includes("/password")) {
+          await page.close();
+          return true;
+        }
+      } catch (err) {
+        console.error(`Unlock verification attempt ${attempt} failed for ${baseUrl}:`, err.message);
+      }
+
+      if (attempt < 2) {
+        await page.goto(`${baseUrl}/password`, { waitUntil: "networkidle", timeout: 30000 }).catch(() => {});
+      }
+    }
+
+    await page.close();
+    return false;
   }
 
   async function close() {
@@ -96,7 +189,7 @@ async function openSession() {
     await browser.close();
   }
 
-  return { visit, close };
+  return { visit, unlock, close };
 }
 
 // Backwards-compatible one-shot API — kept for callers/tests that only crawl

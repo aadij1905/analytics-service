@@ -1,7 +1,12 @@
 const path = require("path");
 const { openSession } = require("./crawl");
 
-const TOP_N = 8;
+// Crawl time scales roughly linearly per page (shared Playwright session in
+// crawl.js reuses one browser via openSession() — see crawl.js:28 — so this
+// is more iterations, not more browser launches). 50 is high enough to cover
+// effectively every page ShopifyQL reports traffic for, while still capping
+// worst-case crawl time for stores with hundreds of landing pages.
+const TOP_N = 50;
 const SCREENSHOTS_DIR = path.join(__dirname, "../screenshots");
 
 // Shopify themes are template-based (Dawn's product template renders every
@@ -48,29 +53,45 @@ function pickPages(pages, limit = TOP_N) {
   return chosen;
 }
 
-async function runCrawler(normalized, websiteUrl, outputDir = SCREENSHOTS_DIR) {
+async function runCrawler(normalized, websiteUrl, storePassword = null, outputDir = SCREENSHOTS_DIR) {
   const targets = pickPages(normalized.pages, TOP_N);
   const crawledPages = [...normalized.pages];
   const base = websiteUrl.replace(/\/$/, "");
 
   const session = await openSession();
   try {
-    for (const target of targets) {
-      const url = `${base}${target.path}`;
-      try {
-        const crawlResult = await session.visit(url, outputDir);
-        const idx = crawledPages.findIndex((p) => p.path === target.path);
-        if (idx !== -1) {
-          crawledPages[idx] = {
-            ...crawledPages[idx],
-            ...crawlResult,
-            crawlerEnriched: true,
-            template: templateOf(target.path),
-          };
+    // Unlock once per session — the cookie it sets persists across every
+    // visit() below. unlockResult is null if the store isn't
+    // password-protected (proceed normally), false if a wall was found but
+    // unlock genuinely failed (skip — every page would just hit the same
+    // wall, wasting crawl time and repeated password attempts against the
+    // store), true on success.
+    const unlockResult = storePassword ? await session.unlock(base, storePassword) : null;
+
+    if (unlockResult === false) {
+      console.error(`Storefront unlock failed for ${base} — skipping crawl (would only hit the password wall).`);
+    } else {
+      for (const target of targets) {
+        const url = `${base}${target.path}`;
+        try {
+          const crawlResult = await session.visit(url, outputDir);
+          const idx = crawledPages.findIndex((p) => p.path === target.path);
+          if (idx !== -1) {
+            crawledPages[idx] = {
+              ...crawledPages[idx],
+              ...crawlResult,
+              // A page blocked by the password wall (cookie didn't apply,
+              // expired mid-crawl, etc.) is not real data — never mark it
+              // enriched, so downstream consumers (flags, future vision
+              // analysis) don't treat a wall screenshot as the real page.
+              crawlerEnriched: !crawlResult.crawlerBlocked,
+              template: templateOf(target.path),
+            };
+          }
+        } catch (err) {
+          console.error(`Crawler failed for ${url}:`, err.message);
+          // ShopifyQL fields stay intact — only crawler-exclusive fields remain null
         }
-      } catch (err) {
-        console.error(`Crawler failed for ${url}:`, err.message);
-        // ShopifyQL fields stay intact — only crawler-exclusive fields remain null
       }
     }
   } finally {

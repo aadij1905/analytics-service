@@ -61,7 +61,7 @@ function normalize(rawExtraction) {
   // Site-wide overview
   const totalSessions = sumField(overviewRows, "sessions");
   const totalSales = sumField(sales, "total_sales");
-  const totalOrders = sumField(sales, "total_orders");
+  const totalOrders = sumField(sales, "orders");
   const avgOrderValue = totalOrders ? totalSales / totalOrders : 0;
   const overallConversionRate = avgWeighted(overviewRows, "conversion_rate", "sessions");
   const overallBounceRate = avgWeighted(overviewRows, "bounce_rate", "sessions");
@@ -166,7 +166,8 @@ function normalize(rawExtraction) {
       ctaAboveFoldMobile: null,
       hasSocialProof: null,
       scrollDepth: null,
-      screenshotPath: null,
+      screenshotUrl: null,
+      mobileScreenshotUrl: null,
       crawlerEnriched: false,
     };
   });
@@ -253,7 +254,7 @@ function normalize(rawExtraction) {
     dailySales: sales.map((r) => ({
       day: r.day,
       sales: round2(toCount(r.total_sales)),
-      orders: toCount(r.total_orders),
+      orders: toCount(r.orders),
       aov: round2(toCount(r.average_order_value)),
     })),
     funnel: funnelNormalized,
