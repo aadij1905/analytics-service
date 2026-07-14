@@ -7,13 +7,15 @@ function round2(n) { return n == null ? null : Math.round(n * 100) / 100; }
 const DEFAULTS = {
   // Minimum sessions before a page/source is statistically meaningful.
   // Bounce/conversion use 200 (matches typical retail traffic norms).
-  minPageSessions: 200,
-  minSourceSessions: 200,
+  // TEMP: lowered for demoing detectors against a low-traffic test store —
+  // restore to 200/200/100/300 before running against real production data.
+  minPageSessions: 5,
+  minSourceSessions: 5,
   // CWV needs fewer sessions to be actionable — a single slow page still
   // matters even at 100 sessions.
-  minCwvSessions: 100,
+  minCwvSessions: 3,
   // Layout signals are more anecdotal; require 300 sessions to reduce noise.
-  minCtaSessions: 300,
+  minCtaSessions: 5,
 
   // Page bounce > 1.3× site average = flagged.
   bounceRateMultiplier: 1.3,

@@ -56,7 +56,10 @@ function pickPages(pages, limit = TOP_N) {
 async function runCrawler(normalized, websiteUrl, storePassword = null, outputDir = SCREENSHOTS_DIR) {
   const targets = pickPages(normalized.pages, TOP_N);
   const crawledPages = [...normalized.pages];
-  const base = websiteUrl.replace(/\/$/, "");
+  const trimmedUrl = websiteUrl.trim().replace(/\/$/, "");
+  // Store settings can be saved as a bare domain (no scheme) — Playwright's
+  // page.goto rejects that outright rather than assuming https.
+  const base = /^https?:\/\//i.test(trimmedUrl) ? trimmedUrl : `https://${trimmedUrl}`;
 
   const session = await openSession();
   try {
