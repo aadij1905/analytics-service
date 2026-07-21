@@ -7,7 +7,26 @@ const { openSession } = require("./crawl");
 // effectively every page ShopifyQL reports traffic for, while still capping
 // worst-case crawl time for stores with hundreds of landing pages.
 const TOP_N = 50;
+// Pages crawled in parallel. Each visit() opens its own page on the shared
+// browser context (crawl.js), so this is real concurrency, not more browser
+// launches. 4 keeps memory modest while cutting wall-clock ~4× versus the old
+// sequential loop; override with CRAWL_CONCURRENCY.
+const CONCURRENCY = Math.max(1, parseInt(process.env.CRAWL_CONCURRENCY, 10) || 4);
 const SCREENSHOTS_DIR = path.join(__dirname, "../screenshots");
+
+// Runs `worker` over `items` with at most `concurrency` in flight. Workers
+// pull the next index off a shared counter — simple, no external deps.
+async function runPool(items, worker, concurrency) {
+  let next = 0;
+  async function runner() {
+    while (next < items.length) {
+      const i = next++;
+      await worker(items[i]);
+    }
+  }
+  const runners = Array.from({ length: Math.min(concurrency, items.length) }, runner);
+  await Promise.all(runners);
+}
 
 // Shopify themes are template-based (Dawn's product template renders every
 // product page). Crawling the 5 top product pages gives one useful signal
@@ -74,7 +93,7 @@ async function runCrawler(normalized, websiteUrl, storePassword = null, outputDi
     if (unlockResult === false) {
       console.error(`Storefront unlock failed for ${base} — skipping crawl (would only hit the password wall).`);
     } else {
-      for (const target of targets) {
+      await runPool(targets, async (target) => {
         const url = `${base}${target.path}`;
         try {
           const crawlResult = await session.visit(url, outputDir);
@@ -95,7 +114,7 @@ async function runCrawler(normalized, websiteUrl, storePassword = null, outputDi
           console.error(`Crawler failed for ${url}:`, err.message);
           // ShopifyQL fields stay intact — only crawler-exclusive fields remain null
         }
-      }
+      }, CONCURRENCY);
     }
   } finally {
     await session.close();
@@ -104,4 +123,4 @@ async function runCrawler(normalized, websiteUrl, storePassword = null, outputDi
   return { ...normalized, pages: crawledPages };
 }
 
-module.exports = { runCrawler, pickPages, templateOf };
+module.exports = { runCrawler, pickPages, templateOf, runPool };

@@ -45,18 +45,24 @@ function normalizeSource(name) {
 }
 
 function normalize(rawExtraction) {
-  const {
-    overview: overviewRows,
-    sales,
-    pages,
-    trafficSources,
-    devices,
-    funnelBreakdown,
-    checkoutConversion,
-    performanceLCP,
-    performanceCLS,
-    performanceINP,
-  } = rawExtraction.raw;
+  // A ShopifyQL extraction can arrive partial: any individual sub-query may
+  // fail upstream and come back missing OR null (not just omitted). Coerce
+  // every field to an array up front so one failed query degrades that
+  // section to empty instead of throwing and 500-ing the whole ingest —
+  // losing the queries that *did* succeed. (Destructuring defaults only cover
+  // undefined, not null, so this explicit guard is needed.)
+  const raw = rawExtraction.raw || {};
+  const asArr = (v) => (Array.isArray(v) ? v : []);
+  const overviewRows = asArr(raw.overview);
+  const sales = asArr(raw.sales);
+  const pages = asArr(raw.pages);
+  const trafficSources = asArr(raw.trafficSources);
+  const devices = asArr(raw.devices);
+  const funnelBreakdown = asArr(raw.funnelBreakdown);
+  const checkoutConversion = asArr(raw.checkoutConversion);
+  const performanceLCP = asArr(raw.performanceLCP);
+  const performanceCLS = asArr(raw.performanceCLS);
+  const performanceINP = asArr(raw.performanceINP);
 
   // Site-wide overview
   const totalSessions = sumField(overviewRows, "sessions");

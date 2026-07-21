@@ -1,14 +1,28 @@
 function round2(n) { return n == null ? null : Math.round(n * 100) / 100; }
 
+// One-sample z-test for a proportion: how many standard errors the observed
+// page/source rate (pHat over n sessions) sits from the site baseline (p0).
+// This is what lets us flag a low-traffic page without a large minSessions
+// floor — a wild-looking rate over 6 sessions produces a small |z| (likely
+// noise) while the same rate over 6000 sessions produces a large one (real
+// signal). Returns 0 when the inputs can't support a test.
+function zTestProportion(pHat, p0, n) {
+  if (pHat == null || p0 == null || p0 <= 0 || p0 >= 1 || !(n > 0)) return 0;
+  const se = Math.sqrt((p0 * (1 - p0)) / n);
+  if (se === 0) return 0;
+  return (pHat - p0) / se;
+}
+
 // ─── Tunable thresholds ─────────────────────────────────────────────────────
 // One place to change how sensitive the detectors are. Rationale for each
 // default value is inline; override at runtime via detectAll(normalized,
 // { crawlerRan, thresholds }).
 const DEFAULTS = {
-  // Minimum sessions before a page/source is statistically meaningful.
-  // Bounce/conversion use 200 (matches typical retail traffic norms).
-  // TEMP: lowered for demoing detectors against a low-traffic test store —
-  // restore to 200/200/100/300 before running against real production data.
+  // Hard floor on sessions before a page/source is even considered — just
+  // enough to reject n=1..4 where a z-test is meaningless. The real
+  // noise-vs-signal decision is now the significance test (significanceZ
+  // below), so this no longer needs to be a large, traffic-tuned number the
+  // way a raw-multiplier gate did — it stays low safely for any store size.
   minPageSessions: 5,
   minSourceSessions: 5,
   // CWV needs fewer sessions to be actionable — a single slow page still
@@ -39,6 +53,11 @@ const DEFAULTS = {
   revenueDeclineThreshold: -0.15,
   // A page needs 1000 sessions to escalate a bounce/conversion flag to sev 3.
   highTrafficPageSessions: 1000,
+
+  // Minimum z-score for a page/source rate to count as significantly worse
+  // than the site baseline (one-sided ≈ 95% confidence). Raise to ~2.33 for
+  // ≈99% (fewer, higher-confidence flags); lower toward ~1.28 to surface more.
+  significanceZ: 1.645,
 };
 
 // ─── Detectors ──────────────────────────────────────────────────────────────
@@ -54,13 +73,16 @@ function detectHighBouncePages(normalized, t) {
   for (const page of normalized.pages) {
     if (page.bounceRate == null) continue;
     if (page.sessions < t.minPageSessions) continue;
-    if (page.bounceRate <= avgBounce * t.bounceRateMultiplier) continue;
+    if (page.bounceRate <= avgBounce * t.bounceRateMultiplier) continue; // effect size
+    const z = zTestProportion(page.bounceRate, avgBounce, page.sessions);
+    if (z < t.significanceZ) continue; // the gap could be sampling noise
     flags.push({
       type: "high_bounce_page",
       path: page.path,
       value: page.bounceRate,
       baseline: avgBounce,
       sessions: page.sessions,
+      zScore: round2(z),
       severity: page.sessions > t.highTrafficPageSessions ? 3 : 2,
       dataQuality: "real",
     });
@@ -75,13 +97,16 @@ function detectLowConversionPages(normalized, t) {
   for (const page of normalized.pages) {
     if (page.conversionRate == null) continue;
     if (page.sessions < t.minPageSessions) continue;
-    if (page.conversionRate >= avgCr * t.conversionRateMultiplier) continue;
+    if (page.conversionRate >= avgCr * t.conversionRateMultiplier) continue; // effect size
+    const z = zTestProportion(page.conversionRate, avgCr, page.sessions);
+    if (z > -t.significanceZ) continue; // below baseline, but maybe just noise
     flags.push({
       type: "low_conversion_page",
       path: page.path,
       value: page.conversionRate,
       baseline: avgCr,
       sessions: page.sessions,
+      zScore: round2(z),
       severity: page.sessions > t.highTrafficPageSessions ? 3 : 2,
       dataQuality: "real",
     });
@@ -96,9 +121,11 @@ function detectPoorQualityTrafficSource(normalized, t) {
   for (const source of normalized.traffic) {
     if (source.conversionRate == null || source.bounceRate == null) continue;
     if (source.sessions < t.minSourceSessions) continue;
+    const z = zTestProportion(source.conversionRate, avgCr, source.sessions);
     if (
       source.conversionRate < avgCr * t.poorSourceConversionMultiplier &&
-      source.bounceRate > t.poorSourceBounceMin
+      source.bounceRate > t.poorSourceBounceMin &&
+      z <= -t.significanceZ // conversion gap is significant, not small-sample noise
     ) {
       flags.push({
         type: "poor_quality_traffic_source",
@@ -106,6 +133,7 @@ function detectPoorQualityTrafficSource(normalized, t) {
         conversionRate: source.conversionRate,
         bounceRate: source.bounceRate,
         sessions: source.sessions,
+        zScore: round2(z),
         severity: 3,
         dataQuality: "real",
       });
@@ -145,7 +173,13 @@ function detectFunnelDropOff(normalized, t) {
 
 function detectRevenueTrend(normalized, t) {
   const flags = [];
-  const days = normalized.dailySales || [];
+  // The first-half vs second-half comparison below is only meaningful if the
+  // rows are in chronological order — nothing upstream guarantees that, and
+  // unordered rows silently produce false or missed decline flags. Sort by
+  // day first (ISO YYYY-MM-DD sorts correctly as strings).
+  const days = [...(normalized.dailySales || [])]
+    .filter((d) => d && d.day)
+    .sort((a, b) => String(a.day).localeCompare(String(b.day)));
   if (days.length < 4) return flags;
   const mid = Math.floor(days.length / 2);
   const avgFirst = days.slice(0, mid).reduce((s, d) => s + d.sales, 0) / mid;
@@ -235,6 +269,38 @@ function detectCTABelowFold(normalized, t) {
   return flags;
 }
 
+// Flags on the SAME page are often causally linked (e.g. poor_lcp driving
+// high_bounce). Tag each with the other flag types sharing its page so
+// downstream (the AI service) can treat them as one story instead of N
+// independent findings. Additive — never removes or merges flags here.
+function annotateCorrelations(flags) {
+  const byPath = new Map();
+  for (const f of flags) {
+    if (!f.path) continue;
+    if (!byPath.has(f.path)) byPath.set(f.path, []);
+    byPath.get(f.path).push(f);
+  }
+  for (const group of byPath.values()) {
+    if (group.length < 2) continue;
+    for (const f of group) {
+      f.coOccurringOnPage = group.filter((g) => g !== f).map((g) => g.type);
+    }
+  }
+}
+
+// Rank by severity first, then by how many sessions the issue actually touches
+// (a page flag's own sessions; a site-wide flag inherits total sessions) so a
+// sev-2 on a 5000-session page outranks a sev-2 on a 6-session page. The AI
+// service ranks off this order, so getting it right here compounds downstream.
+function scoreAndSort(flags, normalized) {
+  const siteSessions = (normalized.overview && normalized.overview.totalSessions) || 0;
+  for (const f of flags) {
+    const weight = f.sessions != null ? f.sessions : siteSessions;
+    f.impactScore = f.severity * weight;
+  }
+  return flags.sort((a, b) => (b.severity - a.severity) || (b.impactScore - a.impactScore));
+}
+
 function detectAll(normalized, { crawlerRan = false, thresholds } = {}) {
   const t = { ...DEFAULTS, ...(thresholds || {}) };
   const flags = [
@@ -247,7 +313,8 @@ function detectAll(normalized, { crawlerRan = false, thresholds } = {}) {
     ...detectPoorCoreWebVitals(normalized, t),
   ];
   if (crawlerRan) flags.push(...detectCTABelowFold(normalized, t));
-  return flags.sort((a, b) => b.severity - a.severity);
+  annotateCorrelations(flags);
+  return scoreAndSort(flags, normalized);
 }
 
 module.exports = { detectAll, DEFAULTS };

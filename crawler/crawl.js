@@ -19,9 +19,56 @@ const SOCIAL_PROOF_SELECTORS = [
   ".star-rating",
 ];
 
+// Text patterns for the theme-agnostic CTA fallback — matched against a
+// button/link/submit's visible text when none of the CSS selectors above hit
+// (non-Dawn themes name their buttons differently but the wording is stable).
+const CTA_TEXT_PATTERN = "add to cart|add to bag|add to basket|buy now|buy it now|pre-?order";
+
 const DESKTOP_VIEWPORT = { width: 1280, height: 800 };
 const MOBILE_VIEWPORT  = { width: 390,  height: 844 };
 const USER_AGENT = "Mozilla/5.0 (compatible; EXP-Intelligence-Crawler/1.0)";
+
+// A page is "ready enough" to inspect once its primary CTA or a price is in
+// the DOM — waiting on one of these (with a short cap) beats a blind fixed
+// delay that's too short for app-heavy stores and wasted on fast ones.
+const READINESS_SELECTOR = [...CTA_SELECTORS, ".price", "[class*='price']", "[data-price]"].join(",");
+
+// Finds the add-to-cart control: known theme selectors first, then a text
+// heuristic across buttons/submits/links so non-Dawn themes aren't silently
+// under-detected. Returns an ElementHandle or null.
+async function findCtaHandle(page) {
+  for (const sel of CTA_SELECTORS) {
+    const el = await page.$(sel);
+    if (el) return el;
+  }
+  const handle = await page.evaluateHandle((pattern) => {
+    const re = new RegExp(pattern, "i");
+    const els = [...document.querySelectorAll("button, input[type=submit], input[type=button], a[role=button], a")];
+    for (const el of els) {
+      const txt = (el.innerText || el.value || el.getAttribute("aria-label") || "").trim();
+      if (txt && re.test(txt)) return el;
+    }
+    return null;
+  }, CTA_TEXT_PATTERN);
+  return handle.asElement(); // null if the heuristic found nothing
+}
+
+// True if the page shows any review/rating signal — known widget selectors
+// first, then generic star/rating/"N reviews" heuristics for other themes.
+async function detectSocialProof(page) {
+  for (const sel of SOCIAL_PROOF_SELECTORS) {
+    if (await page.$(sel)) return true;
+  }
+  return page.evaluate(() => {
+    if (document.querySelector("[class*='star' i], [class*='rating' i], [aria-label*='star' i], [aria-label*='rating' i]")) {
+      return true;
+    }
+    const text = (document.body && document.body.innerText) || "";
+    return /★|⭐/.test(text)
+      || /\b\d+(\.\d+)?\s*(?:out of|\/)\s*5\b/i.test(text)   // "4.5 out of 5", "4.5/5"
+      || /\b\d+\s+reviews?\b/i.test(text);                    // "128 reviews"
+  });
+}
 
 // Reusable browser session. Previously we booted a full Chromium per page —
 // ~1s of overhead × 8 pages was wasted. Now callers open a session once and
@@ -44,7 +91,10 @@ async function openSession() {
       // loading, then gives app-injected DOM (CTAs, review widgets) a beat
       // to render without waiting on background traffic that never quiets.
       await page.goto(pageUrl, { waitUntil: "load", timeout: 30000 });
-      await page.waitForTimeout(1000);
+      // Wait for the CTA/price to render (app-injected DOM often lands after
+      // "load"), capped short; fall back to a brief settle if it never shows.
+      await page.waitForSelector(READINESS_SELECTOR, { timeout: 3000 }).catch(() => {});
+      await page.waitForTimeout(400);
 
       // Every visit — not just the initial unlock — checks for the password
       // wall. The unlock cookie can fail to apply to a given request, expire
@@ -65,32 +115,28 @@ async function openSession() {
         };
       }
 
-      // CTA detection
+      // CTA detection (theme selectors, then a text heuristic — see findCtaHandle)
       let ctaText = null;
       let ctaAboveFoldDesktop = null;
       let ctaAboveFoldMobile = null;
 
-      for (const sel of CTA_SELECTORS) {
-        const el = await page.$(sel);
-        if (!el) continue;
-        ctaText = await el.textContent().then((t) => t?.trim() || null);
-        const box = await el.boundingBox();
+      const ctaEl = await findCtaHandle(page);
+      if (ctaEl) {
+        const raw = await ctaEl.textContent().then((t) => t?.trim() || null);
+        ctaText = raw
+          || (await ctaEl.evaluate((n) => (n.value || n.getAttribute("aria-label") || "").trim() || null).catch(() => null));
+        const box = await ctaEl.boundingBox();
         if (box) {
           ctaAboveFoldDesktop = box.y < DESKTOP_VIEWPORT.height;
           await page.setViewportSize(MOBILE_VIEWPORT);
-          const mobileBox = await el.boundingBox();
+          const mobileBox = await ctaEl.boundingBox();
           ctaAboveFoldMobile = mobileBox ? mobileBox.y < MOBILE_VIEWPORT.height : null;
           await page.setViewportSize(DESKTOP_VIEWPORT);
         }
-        break;
       }
 
-      // Social proof detection
-      let hasSocialProof = false;
-      for (const sel of SOCIAL_PROOF_SELECTORS) {
-        const el = await page.$(sel);
-        if (el) { hasSocialProof = true; break; }
-      }
+      // Social proof detection (theme selectors, then generic heuristics)
+      const hasSocialProof = await detectSocialProof(page);
 
       // Scroll-depth estimate: how much of the page fits in a desktop viewport.
       const scrollHeight = await page.evaluate(() => document.body.scrollHeight);
