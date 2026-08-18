@@ -55,4 +55,4 @@ async function saveScreenshot(buffer, filename, outputDir) {
   }
 }
 
-module.exports = { saveScreenshot, useR2 };
+module.exports = { saveScreenshot };

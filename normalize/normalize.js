@@ -270,4 +270,4 @@ function normalize(rawExtraction) {
   };
 }
 
-module.exports = { normalize };
+module.exports = { normalize, round2 };

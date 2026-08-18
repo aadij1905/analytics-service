@@ -1,4 +1,4 @@
-function round2(n) { return n == null ? null : Math.round(n * 100) / 100; }
+const { round2 } = require("../normalize/normalize");
 
 // One-sample z-test for a proportion: how many standard errors the observed
 // page/source rate (pHat over n sessions) sits from the site baseline (p0).
@@ -15,8 +15,7 @@ function zTestProportion(pHat, p0, n) {
 
 // ─── Tunable thresholds ─────────────────────────────────────────────────────
 // One place to change how sensitive the detectors are. Rationale for each
-// default value is inline; override at runtime via detectAll(normalized,
-// { crawlerRan, thresholds }).
+// default value is inline below.
 const DEFAULTS = {
   // Hard floor on sessions before a page/source is even considered — just
   // enough to reject n=1..4 where a z-test is meaningless. The real
@@ -301,8 +300,8 @@ function scoreAndSort(flags, normalized) {
   return flags.sort((a, b) => (b.severity - a.severity) || (b.impactScore - a.impactScore));
 }
 
-function detectAll(normalized, { crawlerRan = false, thresholds } = {}) {
-  const t = { ...DEFAULTS, ...(thresholds || {}) };
+function detectAll(normalized, { crawlerRan = false } = {}) {
+  const t = DEFAULTS;
   const flags = [
     ...detectHighBouncePages(normalized, t),
     ...detectLowConversionPages(normalized, t),

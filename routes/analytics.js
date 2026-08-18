@@ -29,7 +29,6 @@ router.get("/health", (req, res) => {
     version: "4.0.0",
     timestamp: new Date().toISOString(),
     storesWithRealData: listStores(),
-    crawlerAvailable: true,
   });
 });
 

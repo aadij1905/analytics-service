@@ -246,15 +246,4 @@ async function openSession() {
   return { visit, unlock, close };
 }
 
-// Backwards-compatible one-shot API — kept for callers/tests that only crawl
-// a single page.
-async function crawlPage(pageUrl, outputDir) {
-  const session = await openSession();
-  try {
-    return await session.visit(pageUrl, outputDir);
-  } finally {
-    await session.close();
-  }
-}
-
-module.exports = { crawlPage, openSession };
+module.exports = { openSession };

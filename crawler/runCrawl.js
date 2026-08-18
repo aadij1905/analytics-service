@@ -123,4 +123,4 @@ async function runCrawler(normalized, websiteUrl, storePassword = null, outputDi
   return { ...normalized, pages: crawledPages };
 }
 
-module.exports = { runCrawler, pickPages, templateOf, runPool };
+module.exports = { runCrawler };
